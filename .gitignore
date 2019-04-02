@@ -1,0 +1,8 @@
+__pycache__*
+stupid.py
+*egg-info*
+data*
+vendor/bit-torrent*
+vendor/Jackett*
+venv*
+config.ini.bak
