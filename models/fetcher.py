@@ -1,8 +1,10 @@
+from datetime import datetime, timedelta
 import os
 import re
+import subprocess
 import sys
 
-from sqlalchemy import not_
+from sqlalchemy import and_, not_
 from string import digits
 
 from .db import (
@@ -25,7 +27,7 @@ class EpisodeFetcher:
         db_config = get_config_values(self.config, "db")
         return get_session(db_config["uri"])
 
-    def __init__(self, config, series_ids=[]):
+    def __init__(self, config):
         self.config = config
         self.session = self._get_session()
         self.jackett = self._get_jackett()
@@ -34,13 +36,26 @@ class EpisodeFetcher:
         completed_cte = (
             self.session.query(EpisodeTorrent.episode_id.label("episode_id"))
             .filter(EpisodeTorrent.complete)
-            .groupby(EpisodeTorrent.episode_id)
+            .group_by(EpisodeTorrent.episode_id)
         ).cte("completed_cte")
 
+        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        recently_added_cte = (
+            self.session.query(EpisodeTorrent.episode_id.label("episode_id"))
+            .filter(EpisodeTorrent.created_at >= one_hour_ago)
+            .group_by(EpisodeTorrent.episode_id)
+        ).cte("recently_added_cte")
+
+        is_null_clause = and_(
+            completed_cte.c.episode_id.is_(None),
+            recently_added_cte.c.episode_id.is_(None),
+        )
         query = (
 			self.session.query(Episode)
 			.outerjoin(completed_cte, completed_cte.c.episode_id == Episode.id)
-			.filter(completed_cte.c.episode_id is None)
+            .outerjoin(recently_added_cte, recently_added_cte.c.episode_id == Episode.id)
+			.filter(is_null_clause)
+            .filter(Episode.air_date < datetime.utcnow())
 		)
         if series_ids:
             query = query.filter(Episode.series_id.in_(series_ids))
@@ -50,13 +65,34 @@ class EpisodeFetcher:
         series_folder = self.jackett._series_folder(series_name)
         self.jackett.start_torrent_transfer(torrent_file, series_folder)
 
-    def download_all_non_complete_episodes(self):
-        for ep in self.non_downloaded_episodes(series_ids=self.series_ids):
+    def _best_result(self, search_results):
+        best_result = None
+        for search in search_results:
+            search_filename = self.jackett.get_torrent_file_from_search(search)
+            already_downloaded = (
+                self.session.query(EpisodeTorrent)
+                .filter(EpisodeTorrent.filename == search_filename)
+            ).first()
+            if already_downloaded:
+                continue
+            best_result = search
+            best_result["filename"] = search_filename
+            break
+        return best_result
+
+    def download_all_non_complete_episodes(self, series_ids=[],
+                                           pause_transfer=False):
+        self._append_path()
+        for ep in self.non_downloaded_episodes(series_ids=series_ids):
             search_results = self.jackett.search(ep.indexed_name)
             if not search_results:
                 return
+
             series_name = ep.series.name
-            best_result = self.best_search_result(search_results)
+            search_results = self.sort_search_results(search_results)
+            best_result = self._best_result(search_results)
+            if not best_result:
+                continue
 
             torrent_file = self.jackett.download_torrent_file(series_name,
                                                               best_result)
@@ -64,20 +100,24 @@ class EpisodeFetcher:
 
             episode_torrent = EpisodeTorrent(
                 episode_id=ep.id,
+                filename=best_result["filename"],
                 torrent_name=torrent_info["suggested_name"],
                 archive_file=torrent_info["archive_file"],
                 info_hash=torrent_info["info_hash"],
             )
-            self._start_transfer(torrent_file, series_name)
             self.session.add(episode_torrent)
             self.session.commit()
+            print(f"Downloaded: {ep.indexed_name}: {torrent_info['suggested_name']}")
+            if pause_transfer:
+                continue
+                self._start_transfer(torrent_file, series_name)
 
     def download_specific_episode(self, episode, pause=False):
         search_results = self.jackett.search(episode.indexed_name)
         if not search_results:
             return
         series_name = episode.series.name
-        best_result = self.best_search_result(search_results)
+        search_results = self.sort_search_results(search_results)
         torrent_file = self.jackett.download_torrent_file(series_name,
                                                           best_result)
         torrent_info = self._torrent_info(torrent_file)
@@ -119,8 +159,8 @@ class EpisodeFetcher:
                 if ep_torrent.info_hash == status["ID"]:
                     self.process_running_torrent(ep_torrent, status)
 
-    def best_search_result(self, search_results):
-        return sorted(search_results, key=lambda x: x["Seeders"], reverse=True)[0]
+    def sort_search_results(self, search_results):
+        return sorted(search_results, key=lambda x: x["Seeders"], reverse=True)
 
     def _process_status_line(self, line, current_status, statuses):
         _digits = lambda x: re.findall(r'[\d\.]+', x)[0]
@@ -167,22 +207,53 @@ class EpisodeFetcher:
 
         return statuses
 
-    def process_running_torrent(self, ep_torrent, status):
+    def process_running_torrent(self, episode_torrent, status):
         # Torrent not complete. Nothing to do.
-        if float(status["percent"]) < 100:
+        if float(status["Progress"]) < 100:
             print("Not complete:", status)
             return
-        ep_torrent.complete = True
+        episode_torrent.complete = True
+        episode_torrent.completed_at = datetime.utcnow()
         self.session.commit()
-        # TODO extract the torrent etc.
 
-    def extract_archive(self):
-        pass
+        if episode_torrent.archive_file:
+            self.extract_archive(episode_torrent)
+
+    def extract_archive(self, episode_torrent):
+        """
+        Extract the completed episode_torrent
+        Using subprocess 7zip.
+        """
+        series_folder = (
+            self.jackett._series_folder(episode_torrent.episode.series.name)
+        )
+        archive_path = os.path.join(
+            series_folder,
+            episode_torrent.archive_file,
+        )
+        stdout, stderr = self._7zip_subprocess(archive_path, series_folder)
+        if stderr:
+            print(f"Error Extracting {episode_torrent.archive_file}")
+            print(stderr.decode())
+
+    def _7zip_subprocess(self, archive_path, output_folder):
+        # 7z is dumb no space
+        output_switch = "-o" + output_folder
+        Popen_args = [
+            "7z",
+            "x",
+            archive_path,
+            output_switch,
+        ]
+        _7zip_process = subprocess.Popen(Popen_args,
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+        stdout, stderr = _7zip_process.communicate()
+        return (stdout, stderr)
 
     @must_be_set("path_appended")
-    def _torrent_info(self, torrent_file, download_dir=None):
+    def _torrent_info(self, torrent_filename, download_dir=None):
         from torrent_client.models import TorrentInfo
-        torrent_filename = torrent_file.name
         torrent_info = TorrentInfo.from_file(torrent_filename,
                                              download_dir=download_dir)
 
@@ -216,7 +287,6 @@ class EpisodeFetcher:
                 return filename
 
         return min_file
-
 
     def _append_path(self):
         sys.path.append(

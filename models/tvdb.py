@@ -8,21 +8,15 @@ from .db import (
     Series,
 )
 from exceptions import MissingSeries
+from utils.config_parser import get_config_values
 from utils.decorators import must_be_set
 
 TOKEN = "jwt_token"
 
-#def logged_in(attribute):
-#    def _logged_in(_func):
-#        def wrapper(self, *args):
-#            already_set = self.__dict__.get(attribute)
-#            if already_set is None:
-#                raise Exception("Not Logged in!")
-#            return _func(self, *args)
-#        return wrapper
-#    return _logged_in
 
 class TVDBAPI:
+    DEFAULTAPI = "thetvdb.com"
+
     headers = {
         'Accept' : 'application/json',
         'Content-Type' : 'application/json',
@@ -41,10 +35,17 @@ class TVDBAPI:
         self.headers.update(
             Authorization="Bearer {}".format(self.jwt_token)
         )
-    def __init__(self, api_section):
-        self.base_endpoint = api_section.get("endpoint")
-        self.apikey = api_section.get("apikey")
-        self.session = get_session()
+
+    def _set_config_values(self):
+        config_values = get_config_values(self.config, self.DEFAULTAPI)
+        db_values = get_config_values(self.config, "db")
+        self.base_endpoint = config_values.get("endpoint")
+        self.apikey = config_values.get("apikey")
+        self.session = get_session(db_values.get("uri"))
+
+    def __init__(self, config_fp):
+        self.config = config_fp
+        self._set_config_values()
         self.series_map = dict()
 
     def login(self):
@@ -190,10 +191,10 @@ class TVDBAPI:
         for series in query:
             # yielded lists
             for episodes in self.get_series_episodes(series):
-                self._insert_episodes(episodes)
+                self._insert_episodes(series, episodes)
         self._update_series_max_page()
 
-    def _insert_episodes(self, episodes):
+    def _insert_episodes(self, series, episodes):
         def get_fields(ep):
 
             air_date = ep.get("firstAired")
@@ -210,15 +211,19 @@ class TVDBAPI:
                 "air_date": air_date,
                 "overview": ep.get("overview"),
             }
+        added = 0
         for ep in episodes:
             query = (
                 self.session.query(Episode)
                 .filter(Episode.id == ep.get("id"))
-                .filter(Episode.series_id == ep.get("SeriesId"))
+                .filter(Episode.series_id == ep.get("seriesId"))
             )
             if query.first() is None:
                 new_ep = Episode(**get_fields(ep))
                 self.session.add(new_ep)
+                added += 1
+
+        print('Added {} episodes for "{}"'.format(added, series.name))
         self.session.commit()
 
     def _update_series_max_page(self):

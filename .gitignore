@@ -6,3 +6,4 @@ vendor/bit-torrent*
 vendor/Jackett*
 venv*
 config.ini.bak
+*PID

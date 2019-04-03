@@ -1,8 +1,16 @@
+from datetime import datetime
 import os
 
-from sqlalchemy import create_engine, Column, ForeignKey, Integer, String
+from sqlalchemy import (
+    Column,
+    create_engine,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,)
+
 from sqlalchemy.types import Boolean, Date
-from sqlalchemy.dialects.sqlite import TIMESTAMP
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 
@@ -27,9 +35,8 @@ class Episode(Base):
     season_number = Column(Integer)
     episode_number = Column(Integer)
     name = Column(String)
-    air_date = Column(Date)
+    air_date = Column(DateTime())
     overview = Column(String)
-    #downloaded = Column(Boolean, default=False)
     series = relationship(Series)
 
     @property
@@ -45,28 +52,17 @@ class Episode(Base):
 
 class EpisodeTorrent(Base):
     __tablename__ = "episode_torrent"
-    id = Column(Integer, autoincrement=True, primary_key=True)
+    info_hash = Column(String, primary_key=True)
     episode_id = Column(Integer, ForeignKey("episode.id"))
+    filename = Column(String)
     torrent_name = Column(String)
     archive_file = Column(String)
     complete = Column(Boolean, default=False)
-    completed_at = Column(TIMESTAMP)
-    info_hash = Column(String)
+    created_at = Column(DateTime(), default=datetime.utcnow)
+    completed_at = Column(DateTime())
     episode = relationship(Episode)
 
-#def _get_db_path():
-#    return os.path.join(
-#        os.path.abspath(__file__ + "/../../"),
-#        "data",
-#        "series.db"
-#    )
-
-#def _get_engine_uri(driver):
-#    db_path = _get_db_path()
-#    engine_uri = EngineMap.get(driver)
-#    if not engine_uri:
-#        raise Exception("Engine Type not implemented")
-#    return engine_uri.format(db_path)
+Index("idx_episode_torrent_filename", EpisodeTorrent.filename)
 
 def get_engine(db_uri):
     """Creates the db engine"""

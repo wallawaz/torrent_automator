@@ -1,17 +1,38 @@
 import json
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from requests.exceptions import ConnectionError
+
 import subprocess
 import time
 from urllib.parse import parse_qs
 
+
 class Jackett:
+
     headers = {
         'Accept-Encoding': 'gzip, deflate, br',
         'Accept-Language': 'en-US,en;q=0.9',
         'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.121 Safari/537.36',
         'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
     }
+
+    def check_server_is_running(self):
+        s = requests.Session()
+        s.mount(self.host, HTTPAdapter(max_retries=1))
+
+        try:
+            response = s.get(
+                self.search_url,
+                params={
+                    "Query": "Test",
+                    "Tracker[]": ",".join(self.trackers),
+                    "apikey": self.apikey,
+                }
+            )
+        except ConnectionError:
+            raise Exception("Jackett server not running!")
 
     @property
     def search_url(self):
@@ -21,7 +42,7 @@ class Jackett:
         setattr(self, value, self.config[value])
 
     def set_config_values(self):
-        for c in ["api_key", "host", "torrent_directory"]:
+        for c in ["apikey", "host", "torrent_directory"]:
             self.set_config_value(c)
 
         # Set self.trackers as a list.
@@ -31,9 +52,10 @@ class Jackett:
     def __init__(self, config_section):
         self.config = config_section
         self.set_config_values()
+        self.check_server_is_running()
 
     def search(self, search_str):
-        """Search Jackett server (most likely running locally) """
+        """Search Jackett server (running locally) """
         trackers = ",".join(self.trackers)
 
         response = requests.get(
@@ -41,7 +63,7 @@ class Jackett:
             params={
                 "Query": search_str,
                 "Tracker[]": trackers,
-                "apikey": self.api_key,
+                "apikey": self.apikey,
             }
         )
         if response.status_code != 200:
@@ -65,10 +87,9 @@ class Jackett:
             filename + ".torrent"
         )
 
-    def download_torrent_file(self, series_name, search_result, link="Link"):
+    def download_torrent_file(self, series_name, search_result):
         torrent_filename = self.get_torrent_file_from_search(
-            search_result,
-            link
+            search_result
         )
         out_torrent_file = self.output_torrent_file(series_name, torrent_filename)
         with open(out_torrent_file,  "wb") as outf:
@@ -76,9 +97,9 @@ class Jackett:
             outf.write(response.content)
         return out_torrent_file
 
-    def get_torrent_file_from_search(self, search_result, link):
+    def get_torrent_file_from_search(self, search_result):
         try:
-            url = search_result[link]
+            url = search_result["Link"]
             parsed_url = parse_qs(url)
             filename = parsed_url["file"]
         except KeyError:

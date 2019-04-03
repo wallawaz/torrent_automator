@@ -1,7 +1,6 @@
 import configparser
 
 config_parser = configparser.ConfigParser()
-DEFAULTAPI = "thetvdb.com"
 
 def get_config_values(config, section):
     if config.endswith(".ini"):
