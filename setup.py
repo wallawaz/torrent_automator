@@ -14,5 +14,6 @@ setup(
     author_email="bwallad@gmail.com",
     install_requires=install_requires,
     scripts=[],
-    packages=find_packages()
+    packages=find_packages(),
+    python_requires=">=3.6",
 )
