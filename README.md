@@ -67,7 +67,7 @@ torrent_directory = <path to directory to store downloaded .torrent files>
 ```
 
 ### Running
-1. python app.py --add-series Corporate
+1. python app.py --add-series <series_name>
 1. python app.py --add-eps
 1. python app.py --download (CRON)
 1. python app.py --status (CRON)
