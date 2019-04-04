@@ -110,7 +110,7 @@ class EpisodeFetcher:
             print(f"Downloaded: {ep.indexed_name}: {torrent_info['suggested_name']}")
             if pause_transfer:
                 continue
-                self._start_transfer(torrent_file, series_name)
+            self._start_transfer(torrent_file, series_name)
 
     def download_specific_episode(self, episode, pause=False):
         search_results = self.jackett.search(episode.indexed_name)
