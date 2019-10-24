@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/bin/bash
 
 BITTORRENT_FOLDER="$(pwd)""/vendor/bit-torrent"
 JACKETT_FOLDER="$(pwd)""/vendor/Jackett"

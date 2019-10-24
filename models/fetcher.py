@@ -3,8 +3,9 @@ import os
 import re
 import subprocess
 import sys
+import time
 
-from sqlalchemy import and_, not_
+from sqlalchemy import and_, not_, or_
 from string import digits
 
 from .db import (
@@ -12,6 +13,7 @@ from .db import (
     Episode,
 	EpisodeTorrent,
     Series,
+    SeriesExclusion,
 )
 from .jackett import Jackett
 from utils.config_parser import get_config_values
@@ -27,8 +29,9 @@ class EpisodeFetcher:
         db_config = get_config_values(self.config, "db")
         return get_session(db_config["uri"])
 
-    def __init__(self, config):
+    def __init__(self, config, shortened_searches=False):
         self.config = config
+        self.shortened_searches = shortened_searches
         self.session = self._get_session()
         self.jackett = self._get_jackett()
 
@@ -54,8 +57,13 @@ class EpisodeFetcher:
 			self.session.query(Episode)
 			.outerjoin(completed_cte, completed_cte.c.episode_id == Episode.id)
             .outerjoin(recently_added_cte, recently_added_cte.c.episode_id == Episode.id)
+            .outerjoin(SeriesExclusion, Episode.series_id ==
+                       SeriesExclusion.series_id)
 			.filter(is_null_clause)
-            .filter(Episode.air_date < datetime.utcnow())
+            .filter(or_(
+                SeriesExclusion.series_id.is_(None),
+                Episode.air_date > SeriesExclusion.aired_after)
+            )
 		)
         if series_ids:
             query = query.filter(Episode.series_id.in_(series_ids))
@@ -65,10 +73,12 @@ class EpisodeFetcher:
         series_folder = self.jackett._series_folder(series_name)
         self.jackett.start_torrent_transfer(torrent_file, series_folder)
 
-    def _best_result(self, search_results):
+    def _best_result(self, search_results, excluded):
         best_result = None
         for search in search_results:
             search_filename = self.jackett.get_torrent_file_from_search(search)
+            if search_filename in excluded:
+                continue
             already_downloaded = (
                 self.session.query(EpisodeTorrent)
                 .filter(EpisodeTorrent.filename == search_filename)
@@ -80,24 +90,43 @@ class EpisodeFetcher:
             break
         return best_result
 
+    @property
+    def excluded_filenames(self):
+        query = (
+            self.session.query(SeriesExclusion.filename)
+            .filter(not_(SeriesExclusion.filename.is_(None)))
+        )
+        return [filename for filename in query]
+
+    def search(self, ep):
+        queries = [ep.indexed_name]
+        if self.shortened_searches:
+            queries.append(ep.shortened_indexed_name(episode="z_episode_number"))
+
+        for search_query in queries:
+            print (f"Attempting to find torrents for: {search_query}")
+            search_results = self.jackett.search(search_query)
+            #print(search_results)
+            if search_results:
+                return search_results
+        return []
+
     def download_all_non_complete_episodes(self, series_ids=[],
                                            pause_transfer=False):
         self._append_path()
+        excluded = self.excluded_filenames
         for ep in self.non_downloaded_episodes(series_ids=series_ids):
-            search_results = self.jackett.search(ep.indexed_name)
+            search_results = self.search(ep)
             if not search_results:
-                return
-
-            series_name = ep.series.name
-            search_results = self.sort_search_results(search_results)
-            best_result = self._best_result(search_results)
-            if not best_result:
                 continue
 
-            torrent_file = self.jackett.download_torrent_file(series_name,
+            search_results = self.sort_search_results(search_results)
+            best_result = self._best_result(search_results, excluded)
+            if not best_result:
+                continue
+            torrent_file = self.jackett.download_torrent_file(ep.series.name,
                                                               best_result)
             torrent_info = self._torrent_info(torrent_file)
-
             episode_torrent = EpisodeTorrent(
                 episode_id=ep.id,
                 filename=best_result["filename"],
@@ -107,13 +136,15 @@ class EpisodeFetcher:
             )
             self.session.add(episode_torrent)
             self.session.commit()
+
             print(f"Downloaded: {ep.indexed_name}: {torrent_info['suggested_name']}")
-            if pause_transfer:
+            if pause_transfer is True:
                 continue
-                self._start_transfer(torrent_file, series_name)
+            self._start_transfer(torrent_file, ep.series.name)
+            time.sleep(15)
 
     def download_specific_episode(self, episode, pause=False):
-        search_results = self.jackett.search(episode.indexed_name)
+        search_results = self.search(episode)
         if not search_results:
             return
         series_name = episode.series.name

@@ -5,5 +5,5 @@ data*
 vendor/bit-torrent*
 vendor/Jackett*
 venv*
-config.ini.bak
+config.ini
 *PID

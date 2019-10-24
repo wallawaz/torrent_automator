@@ -82,18 +82,19 @@ class TVDBAPI:
         content = json.loads(response.content)
         yield content.get("data")
 
-        links = content.get("link")
-        if links and links.get("next"):
-            link_next = link.get("next")
-            self.series_map[series_id] = int(link_next)
+        links = content.get("links")
+        if not links or not links.get("next"):
+            return
+        link_next = links.get("next")
+        self.series_map[series_id] = link_next
 
-            payload = {"page": link_next}
-            response = requests.get(
-                endpoint,
-                self.headers,
-                params=payload,
-            )
-            self._page_through_response(self, series, endpoint, response)
+        payload = {"page": link_next}
+        res = requests.get(
+            endpoint,
+            headers=self.headers,
+            params=payload,
+        )
+        return self._page_through_response(series_id, endpoint, res)
 
     @must_be_set(TOKEN)
     def get_series_episodes(self, series):
@@ -105,8 +106,9 @@ class TVDBAPI:
 
         # If we have seen this series before and it requires paging:
         if series.pages > 0:
-            payload["page"] = series.page
+            payload["page"] = series.pages
 
+        #TODO
         response = requests.get(
             series_endpoint,
             headers=self.headers,
@@ -198,6 +200,8 @@ class TVDBAPI:
         def get_fields(ep):
 
             air_date = ep.get("firstAired")
+            if air_date == "":
+                air_date = None
             if air_date:
                 air_date = datetime.strptime(air_date, "%Y-%m-%d")
             return {
@@ -235,3 +239,18 @@ class TVDBAPI:
             series = self.session.query(Series).get(series_id)
             series.pages = max_page
         self.session.commit()
+
+    def view_all_series(self):
+        for series in self.session.query(Series):
+            print(f"{series.id}: {series.name}: Latest Episode(s)")
+            query = (
+                self.session.query(Episode)
+                .filter(Episode.series_id == series.id)
+            ).order_by(Episode.air_date.desc()).limit(3)
+            for ep in query:
+                print(f"{ep.episode_number} - {ep.air_date}")
+            print("-" * 10)
+
+
+
+
